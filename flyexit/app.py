@@ -279,57 +279,60 @@ class FlyVPNApp(App[None]):
     @work(thread=True)
     def _run_launch(self) -> None:
         """Single worker: preflight → launch → connect."""
-        app_name = self._cfg.get("app_name", DEFAULT_APP_NAME)
-        org = self._cfg.get("org", DEFAULT_ORG)
+        try:
+            app_name = self._cfg.get("app_name", DEFAULT_APP_NAME)
+            org = self._cfg.get("org", DEFAULT_ORG)
 
-        pf = self._session.preflight(app_name, org)
-        if pf.username:
-            self.call_from_thread(self._log, f"[dim]Authenticated as {pf.username}[/]")
-        if pf.status is not PreflightStatus.OK:
-            self.call_from_thread(self._log, f"[bold red]⚠  {pf.error}[/]")
-            return
+            pf = self._session.preflight(app_name, org)
+            if pf.username:
+                self.call_from_thread(self._log, f"[dim]Authenticated as {pf.username}[/]")
+            if pf.status is not PreflightStatus.OK:
+                self.call_from_thread(self._log, f"[bold red]⚠  {pf.error}[/]")
+                return
 
-        self.call_from_thread(
-            self._log, f"[dim]App [bold]{app_name}[/bold] created ✅[/]"
-        )
+            self.call_from_thread(
+                self._log, f"[dim]App [bold]{app_name}[/bold] created ✅[/]"
+            )
 
-        region = self.query_one("#region-select", Select).value
-        if region is Select.BLANK:
-            region = self._cfg.get("region", "ams")
-        region = str(region)
-        self._cfg["region"] = region
-        config.save(self._cfg)
+            region = self.query_one("#region-select", Select).value
+            if region is Select.BLANK:
+                region = self._cfg.get("region", "ams")
+            region = str(region)
+            self._cfg["region"] = region
+            config.save(self._cfg)
 
-        self.call_from_thread(self._set_buttons, launching=True)
-        self.call_from_thread(self._set_status, f"🔄 Launching in {region}…")
-        self.call_from_thread(
-            self._log,
-            f"\n[bold cyan]>>> Launching exit node in [yellow]{region}[/yellow]…[/]",
-        )
-
-        result = self._session.launch(
-            app_name,
-            region,
-            on_output=lambda line: self.call_from_thread(self._log, line),
-        )
-
-        if result.status is LaunchStatus.OK:
+            self.call_from_thread(self._set_buttons, launching=True)
+            self.call_from_thread(self._set_status, f"🔄 Launching in {region}…")
             self.call_from_thread(
                 self._log,
-                "[bold green]✅ Node launched successfully![/]",
+                f"\n[bold cyan]>>> Launching exit node in [yellow]{region}[/yellow]…[/]",
             )
-            self.call_from_thread(self._set_status, f"✅ Running in {region}")
-            self._show_connect_result(region)
-            return
 
-        self._log_launch_error(result)
+            result = self._session.launch(
+                app_name,
+                region,
+                on_output=lambda line: self.call_from_thread(self._log, line),
+            )
 
-        self.call_from_thread(self._log, "[dim]🧹 Cleaning up remote resources…[/]")
-        app_d, ok = self._session.teardown()
-        self._log_teardown(app_d, ok, from_thread=True)
-        self.call_from_thread(self._set_buttons, launching=False)
-        self.call_from_thread(self._set_status, "Ready")
-        self._launching = False
+            if result.status is LaunchStatus.OK:
+                self.call_from_thread(
+                    self._log,
+                    "[bold green]✅ Node launched successfully![/]",
+                )
+                self.call_from_thread(self._set_status, f"✅ Running in {region}")
+                self._show_connect_result(region)
+                return
+
+            self._log_launch_error(result)
+
+            self.call_from_thread(self._log, "[dim]🧹 Cleaning up remote resources…[/]")
+            app_d, ok = self._session.teardown()
+            self._log_teardown(app_d, ok, from_thread=True)
+        finally:
+            self._launching = False
+            if not self._session.is_active:
+                self.call_from_thread(self._set_buttons, launching=False)
+                self.call_from_thread(self._set_status, "Ready")
 
     def _show_connect_result(self, region: str) -> None:
         """Wait for Tailscale exit node and display the outcome."""
@@ -382,8 +385,6 @@ class FlyVPNApp(App[None]):
                 f"🟡 Running in {region} — manual connect needed",
             )
 
-        self._launching = False
-
     def _do_stop(self) -> None:
         if self._stopping:
             return
@@ -401,42 +402,44 @@ class FlyVPNApp(App[None]):
     @work(thread=True)
     def _run_stop(self) -> None:
         """Teardown session in a background thread."""
-        app_name, ok = self._session.teardown()
-        self.call_from_thread(self._log, "[dim]🔌 Disconnected from exit node[/]")
-        self._log_teardown(app_name, ok, from_thread=True)
-        if ok and app_name:
-            if self._session._client is not None:
-                self.call_from_thread(
-                    self._log,
-                    "[dim]🗑  Tailscale node removed from tailnet.[/]",
-                )
-            else:
-                self.call_from_thread(
-                    self._log,
-                    "[dim]💨 Tailscale ephemeral node will auto-remove"
-                    " within a few minutes.[/]",
-                )
         try:
-            from flyexit.usage_db import (
-                format_cost,
-                format_duration,
-                get_stats,
-            )
-
-            stats = get_stats()
-            if stats.total_sessions > 0:
-                cost_line = (
-                    f"[dim]💰 {stats.total_sessions} session(s),"
-                    f" {format_duration(stats.total_seconds)},"
-                    f" {format_cost(stats.total_cost)} spent[/]"
+            app_name, ok = self._session.teardown()
+            self.call_from_thread(self._log, "[dim]🔌 Disconnected from exit node[/]")
+            self._log_teardown(app_name, ok, from_thread=True)
+            if ok and app_name:
+                if self._session._client is not None:
+                    self.call_from_thread(
+                        self._log,
+                        "[dim]🗑  Tailscale node removed from tailnet.[/]",
+                    )
+                else:
+                    self.call_from_thread(
+                        self._log,
+                        "[dim]💨 Tailscale ephemeral node will auto-remove"
+                        " within a few minutes.[/]",
+                    )
+            try:
+                from flyexit.usage_db import (
+                    format_cost,
+                    format_duration,
+                    get_stats,
                 )
-                self.call_from_thread(self._log, cost_line)
-        except Exception:  # noqa: BLE001, S110
-            pass
-        self.call_from_thread(self._refresh_stats)
-        self.call_from_thread(self._set_buttons, launching=False)
-        self.call_from_thread(self._set_status, "Ready")
-        self._stopping = False
+
+                stats = get_stats()
+                if stats.total_sessions > 0:
+                    cost_line = (
+                        f"[dim]💰 {stats.total_sessions} session(s),"
+                        f" {format_duration(stats.total_seconds)},"
+                        f" {format_cost(stats.total_cost)} spent[/]"
+                    )
+                    self.call_from_thread(self._log, cost_line)
+            except Exception:  # noqa: BLE001, S110
+                pass
+            self.call_from_thread(self._refresh_stats)
+        finally:
+            self._stopping = False
+            self.call_from_thread(self._set_buttons, launching=False)
+            self.call_from_thread(self._set_status, "Ready")
 
     def _teardown_with_log(self) -> None:
         """Synchronous teardown used by action_quit."""
