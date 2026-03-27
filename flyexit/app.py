@@ -285,7 +285,9 @@ class FlyVPNApp(App[None]):
 
             pf = self._session.preflight(app_name, org)
             if pf.username:
-                self.call_from_thread(self._log, f"[dim]Authenticated as {pf.username}[/]")
+                self.call_from_thread(
+                    self._log, f"[dim]Authenticated as {pf.username}[/]"
+                )
             if pf.status is not PreflightStatus.OK:
                 self.call_from_thread(self._log, f"[bold red]⚠  {pf.error}[/]")
                 return
@@ -305,7 +307,8 @@ class FlyVPNApp(App[None]):
             self.call_from_thread(self._set_status, f"🔄 Launching in {region}…")
             self.call_from_thread(
                 self._log,
-                f"\n[bold cyan]>>> Launching exit node in [yellow]{region}[/yellow]…[/]",
+                f"\n[bold cyan]>>> Launching exit node in"
+                f" [yellow]{region}[/yellow]…[/]",
             )
 
             result = self._session.launch(
@@ -438,8 +441,15 @@ class FlyVPNApp(App[None]):
             self.call_from_thread(self._refresh_stats)
         finally:
             self._stopping = False
-            self.call_from_thread(self._set_buttons, launching=False)
-            self.call_from_thread(self._set_status, "Ready")
+            if not self._session.is_active:
+                self.call_from_thread(self._set_buttons, launching=False)
+                self.call_from_thread(self._set_status, "Ready")
+            else:
+                self.call_from_thread(self._set_buttons, launching=True)
+                self.call_from_thread(
+                    self._set_status,
+                    "⚠️ Stop failed; tunnel still running",
+                )
 
     def _teardown_with_log(self) -> None:
         """Synchronous teardown used by action_quit."""

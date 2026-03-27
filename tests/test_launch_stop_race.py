@@ -1,12 +1,10 @@
-"""Regression tests: _launching / _stopping race conditions.
+"""Regression tests for race conditions in worker launch/stop logic (PR #2).
 
-Bugs fixed in c889974:
-
-1. Permanent-lock – _launching / _stopping remained True after any
+1. Permanent-lock - _launching / _stopping remained True after any
    uncaught exception in a @work(thread=True) worker, because the flag
    was cleared inline (not inside a finally block).
 
-2. Ordering hazard – call_from_thread(_set_buttons, launching=False) was
+2. Ordering hazard - call_from_thread(_set_buttons, launching=False) was
    enqueued while _launching was still True.  The main thread could
    re-enable the button and accept a second click before the worker had
    cleared the flag.
@@ -21,14 +19,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import pytest
 from textual.worker import WorkerFailed
 
 from flyexit.session import PreflightResult, PreflightStatus
-
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -69,7 +69,7 @@ async def _poll(condition: Callable[[], bool], *, timeout: float = 5.0) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bug 1 – permanent-lock: flags cleared even when worker raises
+# Bug 1 - permanent-lock: flags cleared even when worker raises
 # ---------------------------------------------------------------------------
 
 
@@ -115,7 +115,7 @@ async def test_stopping_cleared_when_teardown_raises(app):
 
 
 # ---------------------------------------------------------------------------
-# Bug 2 – ordering: flag must be False before the UI callback fires
+# Bug 2 - ordering: flag must be False before the UI callback fires
 # ---------------------------------------------------------------------------
 
 

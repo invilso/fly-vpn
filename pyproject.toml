@@ -49,6 +49,10 @@ select = [
 ]
 ignore = ["S603", "S607"]  # subprocess with variable / partial path
 
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+"test.py" = ["S101", "RUF003"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["flyexit"]
 
