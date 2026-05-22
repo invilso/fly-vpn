@@ -182,12 +182,10 @@ class VPNSession:
 
         app_status, err = ensure_app_exists(app_name, org)
         if app_status is AppStatus.FAILED:
-            hint = diagnose_fly_error(err, "", app_name=app_name)
-            error_msg = f"{err}\n{hint}" if hint else err
             return PreflightResult(
                 status=PreflightStatus.APP_FAILED,
                 username=username,
-                error=error_msg,
+                error=err,
             )
 
         return PreflightResult(

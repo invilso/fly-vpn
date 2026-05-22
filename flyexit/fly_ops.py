@@ -59,33 +59,22 @@ def ensure_app_exists(app_name: str, org: str) -> tuple[AppStatus, str]:
     Returns ``(status, error)``.  On ``CREATED`` the error string is
     empty; on ``FAILED`` it contains stderr.
 
-    Cleanup is unconditional: ``fly status`` returns non-zero for apps
-    with no machines, so a conditional guard would miss reserved-but-
-    invisible names and cause ``fly apps create`` to fail.
+    Always starts from a clean slate — if the app exists (e.g. from a
+    crashed session), it is destroyed first so there are no stale
+    machines or configs.
     """
-    # Unconditional cleanup — no-ops when absent; also clears apps with
-    # no machines that are invisible to `fly status` but still block creates.
-    kill_all_machines(app_name)
-    destroy_app(app_name)
+    if app_exists(app_name):
+        kill_all_machines(app_name)
+        destroy_app(app_name)
 
-    # Retry create: handles post-destroy propagation lag and names reserved
-    # without a visible app.  Non-transient errors bail out immediately.
-    last_err = ""
-    for _ in range(10):
-        create = subprocess.run(
-            ["fly", "apps", "create", app_name, "--org", org],
-            capture_output=True,
-            text=True,
-            env=FLY_ENV,
-        )
-        if create.returncode == 0:
-            break
-        last_err = create.stderr.strip()
-        if "already been taken" not in last_err.lower():
-            return AppStatus.FAILED, last_err
-        time.sleep(1)
-    else:
-        return AppStatus.FAILED, last_err
+    create = subprocess.run(
+        ["fly", "apps", "create", app_name, "--org", org],
+        capture_output=True,
+        text=True,
+        env=FLY_ENV,
+    )
+    if create.returncode != 0:
+        return AppStatus.FAILED, create.stderr.strip()
 
     # Fly's internal DB may lag behind `apps create` returning 0.
     # Poll until `fly status` sees the app (up to ~5 s).
