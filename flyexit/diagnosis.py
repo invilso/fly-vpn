@@ -43,12 +43,18 @@ _ERROR_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"unauthorized|not authorized|permission denied", re.IGNORECASE),
         "[bold yellow]💡 Tip:[/] Auth issue. Try [bold]fly auth login[/] again.",
     ),
+    (
+        re.compile(r"already.been.taken|name.*taken", re.IGNORECASE),
+        "[bold yellow]💡 Tip:[/] App name [bold]{app_name}[/] is still reserved.\n"
+        "   A watchdog process from a previous session may still be running.\n"
+        "   → Wait 30 s or manually delete it: fly apps destroy {app_name} --yes",
+    ),
 ]
 
 
-def diagnose_fly_error(output: str, region: str) -> str | None:
+def diagnose_fly_error(output: str, region: str, *, app_name: str = "") -> str | None:
     """Match output against known error patterns and return a friendly hint."""
     for pattern, template in _ERROR_PATTERNS:
         if pattern.search(output):
-            return template.format(region=region)
+            return template.format(region=region, app_name=app_name)
     return None
