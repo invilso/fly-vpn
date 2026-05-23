@@ -1,9 +1,8 @@
 """Textual TUI application for Fly VPN.
 
 This module is a **pure UI shell**.  All business logic (auth checks,
-subprocess management, Tailscale connection) lives in
-:mod:`flyexit.session`.  The app only reads structured results and
-formats them for display.
+Fly API calls, Tailscale connection) lives in :mod:`flyexit.session`.
+The app only reads structured results and formats them for display.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ from textual.widgets import (
     Static,
 )
 
-from flyexit import config
+from flyexit import config, keystore
 from flyexit.constants import (
     DEFAULT_APP_NAME,
     DEFAULT_ORG,
@@ -44,7 +43,26 @@ from flyexit.session import (
     PreflightStatus,
     VPNSession,
 )
+from flyexit.settings_screen import SettingsScreen
 from flyexit.styles import APP_CSS
+
+
+def _build_session() -> VPNSession:
+    """Construct a VPNSession using keystore + env-var overrides."""
+    ts_auth_key = (
+        os.environ.get("TAILSCALE_AUTHKEY")
+        or keystore.get("ts_auth_key")
+    )
+    ts_api_key = (
+        os.environ.get("TAILSCALE_API_KEY")
+        or keystore.get("ts_api_key")
+    )
+    ts_login_server = os.environ.get("TS_LOGIN_SERVER", "")
+    return VPNSession(
+        ts_auth_key=ts_auth_key,
+        ts_api_key=ts_api_key,
+        ts_login_server=ts_login_server,
+    )
 
 
 class FlyVPNApp(App[None]):
@@ -58,17 +76,14 @@ class FlyVPNApp(App[None]):
         Binding("q", "quit", "Quit", priority=True),
         Binding("l", "launch", "Launch", priority=True),
         Binding("s", "stop", "Stop", priority=True),
+        Binding("c", "settings", "Settings", priority=True),
         Binding("t", "toggle_dark", "Theme", priority=True),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self._cfg = config.load()
-        self._session = VPNSession(
-            ts_auth_key=os.environ.get("TAILSCALE_AUTHKEY", ""),
-            ts_api_key=os.environ.get("TAILSCALE_API_KEY", ""),
-            ts_login_server=os.environ.get("TS_LOGIN_SERVER", ""),
-        )
+        self._session = _build_session()
         self._launching = False
         self._stopping = False
         self._quitting = False
@@ -76,7 +91,6 @@ class FlyVPNApp(App[None]):
         atexit.register(self._session.emergency_cleanup)
 
     def _on_signal(self, signum: int, _frame: object) -> None:
-        """Handle SIGINT / SIGTERM — clean up and exit."""
         self._session.emergency_cleanup()
         raise SystemExit(128 + signum)
 
@@ -90,10 +104,19 @@ class FlyVPNApp(App[None]):
         log.write("")
         self._refresh_stats()
         self.set_interval(1, self._refresh_stats)
+
+        from flyexit.fly_api import resolve_token
+
+        if not resolve_token():
+            log.write("[bold yellow]⚠  No Fly.io API token found.[/]")
+            log.write("Press [bold]c[/] to open Settings and add one.")
+
         if not self._session.has_auth:
             log.write("[bold red]⚠  No Tailscale auth configured![/]")
-            log.write("Set [bold]TAILSCALE_API_KEY[/] (recommended)")
-            log.write("or [bold]TAILSCALE_AUTHKEY[/] in your .env file.")
+            log.write(
+                "Set [bold]TAILSCALE_API_KEY[/] or [bold]TAILSCALE_AUTHKEY[/]"
+                " in Settings ([bold]c[/]) or your .env file."
+            )
             self.query_one("#btn-launch", Button).disabled = True
 
     def compose(self) -> ComposeResult:
@@ -148,7 +171,6 @@ class FlyVPNApp(App[None]):
         self.query_one("#btn-stop", Button).disabled = not launching
 
     def _refresh_stats(self) -> None:
-        """Reload usage stats and sparkline data from the DB."""
         try:
             from flyexit.usage_db import (
                 format_cost,
@@ -162,7 +184,6 @@ class FlyVPNApp(App[None]):
             total_s = stats.total_seconds
             total_c = stats.total_cost
 
-            # Add live running session cost.
             sid = self._session._db_session_id
             live_suffix = ""
             if sid is not None:
@@ -185,11 +206,18 @@ class FlyVPNApp(App[None]):
         except Exception:  # noqa: BLE001, S110
             pass
 
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
+
     def action_launch(self) -> None:
         self._do_launch()
 
     def action_stop(self) -> None:
         self._do_stop()
+
+    def action_settings(self) -> None:
+        self.push_screen(SettingsScreen(), self._on_settings_closed)
 
     def action_quit(self) -> None:
         if self._quitting:
@@ -200,6 +228,25 @@ class FlyVPNApp(App[None]):
             self._log("[dim]🧹 Cleaning up before exit…[/]")
         self._teardown_with_log()
         super().action_quit()
+
+    def _on_settings_closed(self, saved: bool) -> None:
+        """Re-initialise the session if keys were updated."""
+        if not saved:
+            return
+        self._session.emergency_cleanup()
+        atexit.unregister(self._session.emergency_cleanup)
+        self._session = _build_session()
+        atexit.register(self._session.emergency_cleanup)
+        self._log("[dim]🔑 Credentials updated — session restarted.[/]")
+
+        from flyexit.fly_api import resolve_token
+
+        if resolve_token() and self._session.has_auth:
+            self.query_one("#btn-launch", Button).disabled = False
+
+    # ------------------------------------------------------------------
+    # Button handlers
+    # ------------------------------------------------------------------
 
     @on(Button.Pressed, "#btn-launch")
     def _handle_launch(self) -> None:
@@ -215,9 +262,12 @@ class FlyVPNApp(App[None]):
         self.query_one("#btn-update", Button).label = "⏳ Updating…"
         self._run_update()
 
+    # ------------------------------------------------------------------
+    # Workers
+    # ------------------------------------------------------------------
+
     @work(thread=True)
     def _run_update(self) -> None:
-        """Pull latest code and sync dependencies in the background."""
         import subprocess
         from pathlib import Path
 
@@ -237,11 +287,9 @@ class FlyVPNApp(App[None]):
                     self._log, f"[bold red]❌ git pull failed:[/] {msg}"
                 )
                 return
-
             if "Already up to date" in msg:
                 self.call_from_thread(self._log, "[dim]✔ Already up to date[/]")
                 return
-
             self.call_from_thread(self._log, f"[dim]{msg}[/]")
             self.call_from_thread(self._log, "[dim]📦 Syncing dependencies…[/]")
             sync = subprocess.run(
@@ -285,7 +333,6 @@ class FlyVPNApp(App[None]):
 
     @work(thread=True)
     def _run_launch(self) -> None:
-        """Single worker: preflight → launch → connect."""
         try:
             app_name = self._cfg.get("app_name", DEFAULT_APP_NAME)
             org = self._cfg.get("org", DEFAULT_ORG)
@@ -295,12 +342,23 @@ class FlyVPNApp(App[None]):
                 self.call_from_thread(
                     self._log, f"[dim]Authenticated as {pf.username}[/]"
                 )
+
+            if pf.status is PreflightStatus.TAILSCALE_MISSING:
+                self.call_from_thread(
+                    self._log,
+                    f"[bold red]❌ {pf.error}[/]\n"
+                    "[dim]  → [link=https://tailscale.com/download]"
+                    "tailscale.com/download[/link][/]",
+                )
+                return
+
             if pf.status is not PreflightStatus.OK:
                 self.call_from_thread(self._log, f"[bold red]⚠  {pf.error}[/]")
                 return
 
+            app_name = pf.app_name or app_name
             self.call_from_thread(
-                self._log, f"[dim]App [bold]{app_name}[/bold] created ✅[/]"
+                self._log, f"[dim]App [bold]{app_name}[/bold] ready ✅[/]"
             )
 
             region = self.query_one("#region-select", Select).value
@@ -339,15 +397,13 @@ class FlyVPNApp(App[None]):
 
             if result.status is LaunchStatus.OK:
                 self.call_from_thread(
-                    self._log,
-                    "[bold green]✅ Node launched successfully![/]",
+                    self._log, "[bold green]✅ Node launched successfully![/]"
                 )
                 self.call_from_thread(self._set_status, f"✅ Running in {region}")
                 self._show_connect_result(region)
                 return
 
             self._log_launch_error(result)
-
             self.call_from_thread(self._log, "[dim]🧹 Cleaning up remote resources…[/]")
             app_d, ok = self._session.teardown()
             self._log_teardown(app_d, ok, from_thread=True)
@@ -358,15 +414,13 @@ class FlyVPNApp(App[None]):
                 self.call_from_thread(self._set_status, "Ready")
 
     def _show_connect_result(self, region: str) -> None:
-        """Wait for Tailscale exit node and display the outcome."""
         self.call_from_thread(
             self._log,
             f"[dim]⏳ Waiting for [bold]{TS_EXIT_HOSTNAME}[/bold]"
             " to appear in tailnet…[/]",
         )
         self.call_from_thread(
-            self._set_status,
-            f"⏳ Waiting for exit node in {region}…",
+            self._set_status, f"⏳ Waiting for exit node in {region}…"
         )
 
         status = self._session.wait_and_connect()
@@ -393,19 +447,16 @@ class FlyVPNApp(App[None]):
                 " to terminate and clean up.[/]",
             )
             self.call_from_thread(
-                self._set_status,
-                f"🟡 Running in {region} — manual connect needed",
+                self._set_status, f"🟡 Running in {region} — manual connect needed"
             )
-        else:  # ConnectStatus.FAILED
+        else:
             self.call_from_thread(
                 self._log,
-                "[yellow]⚠  Node is online but auto-connect"
-                " failed.\n  Try manually: tailscale set"
-                f" --exit-node={TS_EXIT_HOSTNAME}[/]",
+                "[yellow]⚠  Node is online but auto-connect failed.\n"
+                f"  Try manually: tailscale set --exit-node={TS_EXIT_HOSTNAME}[/]",
             )
             self.call_from_thread(
-                self._set_status,
-                f"🟡 Running in {region} — manual connect needed",
+                self._set_status, f"🟡 Running in {region} — manual connect needed"
             )
 
     def _do_stop(self) -> None:
@@ -424,7 +475,6 @@ class FlyVPNApp(App[None]):
 
     @work(thread=True)
     def _run_stop(self) -> None:
-        """Teardown session in a background thread."""
         try:
             app_name, ok = self._session.teardown()
             self.call_from_thread(self._log, "[dim]🔌 Disconnected from exit node[/]")
@@ -432,8 +482,7 @@ class FlyVPNApp(App[None]):
             if ok and app_name:
                 if self._session._client is not None:
                     self.call_from_thread(
-                        self._log,
-                        "[dim]🗑  Tailscale node removed from tailnet.[/]",
+                        self._log, "[dim]🗑  Tailscale node removed from tailnet.[/]"
                     )
                 else:
                     self.call_from_thread(
@@ -442,20 +491,16 @@ class FlyVPNApp(App[None]):
                         " within a few minutes.[/]",
                     )
             try:
-                from flyexit.usage_db import (
-                    format_cost,
-                    format_duration,
-                    get_stats,
-                )
+                from flyexit.usage_db import format_cost, format_duration, get_stats
 
                 stats = get_stats()
                 if stats.total_sessions > 0:
-                    cost_line = (
+                    self.call_from_thread(
+                        self._log,
                         f"[dim]💰 {stats.total_sessions} session(s),"
                         f" {format_duration(stats.total_seconds)},"
-                        f" {format_cost(stats.total_cost)} spent[/]"
+                        f" {format_cost(stats.total_cost)} spent[/]",
                     )
-                    self.call_from_thread(self._log, cost_line)
             except Exception:  # noqa: BLE001, S110
                 pass
             self.call_from_thread(self._refresh_stats)
@@ -467,37 +512,27 @@ class FlyVPNApp(App[None]):
             else:
                 self.call_from_thread(self._set_buttons, launching=True)
                 self.call_from_thread(
-                    self._set_status,
-                    "⚠️ Stop failed; tunnel still running",
+                    self._set_status, "⚠️ Stop failed; tunnel still running"
                 )
 
     def _teardown_with_log(self) -> None:
-        """Synchronous teardown used by action_quit."""
         app_name, ok = self._session.teardown()
         self._log_teardown(app_name, ok, from_thread=False)
 
     def _log_launch_error(self, result: LaunchResult) -> None:
-        """Format and log a failed LaunchResult."""
-        if result.status is LaunchStatus.CLI_MISSING:
-            self.call_from_thread(
-                self._log,
-                "[bold red]❌ 'fly' CLI not found.[/]  "
-                "Install → curl -L https://fly.io/install.sh | sh",
-            )
-        elif result.status is LaunchStatus.ERROR:
+        if result.status is LaunchStatus.ERROR:
             self.call_from_thread(self._log, f"[bold red]❌ Error: {result.error}[/]")
-        else:  # LaunchStatus.PROCESS_FAILED
-            self.call_from_thread(
-                self._log,
-                f"[bold red]❌ Exited with code {result.return_code}[/]",
-            )
+        else:  # LaunchStatus.MACHINE_FAILED
+            if result.error:
+                self.call_from_thread(
+                    self._log, f"[bold red]❌ Machine failed:[/] {result.error}"
+                )
             if result.hint:
                 self.call_from_thread(self._log, result.hint)
 
     def _log_teardown(
         self, app_name: str | None, ok: bool, *, from_thread: bool
     ) -> None:
-        """Log the outcome of a session teardown."""
         if not app_name:
             return
         msg = (

@@ -7,13 +7,12 @@ for the shared-cpu-1x machine spec.
 
 from __future__ import annotations
 
-import contextlib
-import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import UTC
-from pathlib import Path
 from typing import Final
+
+from flyexit.db import connect
 
 # Fly.io shared-cpu-1x pricing — per-second (USD).
 # CPU: $1.94/mo, RAM: $2.36/mo per GB.
@@ -29,9 +28,6 @@ COST_PER_SEC: Final[float] = _CPU_PER_SEC + _RAM_PER_GB_PER_SEC * 0.256
 def cost_per_sec(memory_mb: int = 256) -> float:
     """Per-second cost for shared-cpu-1x with *memory_mb* MB RAM."""
     return _CPU_PER_SEC + _RAM_PER_GB_PER_SEC * (memory_mb / 1024)
-
-
-DB_PATH: Final[Path] = Path.home() / ".fly_vpn_usage.db"
 
 
 @dataclass(slots=True)
@@ -55,32 +51,9 @@ class SessionRecord:
     cost_usd: float
 
 
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sessions (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            started_at  REAL    NOT NULL,
-            ended_at    REAL,
-            region      TEXT    NOT NULL,
-            duration_s  INTEGER,
-            cost_usd    REAL,
-            memory_mb   INTEGER
-        )
-        """,
-    )
-    # Migrate older databases that lack the column.
-    with contextlib.suppress(sqlite3.OperationalError):
-        conn.execute("ALTER TABLE sessions ADD COLUMN memory_mb INTEGER")
-    conn.commit()
-    return conn
-
-
 def log_start(region: str, memory_mb: int = 256) -> int:
     """Record session start.  Returns the session row ID."""
-    conn = _connect()
+    conn = connect()
     cur = conn.execute(
         "INSERT INTO sessions (started_at, region, memory_mb) VALUES (?, ?, ?)",
         (time.time(), region, memory_mb),
@@ -94,7 +67,7 @@ def log_start(region: str, memory_mb: int = 256) -> int:
 def log_end(session_id: int) -> tuple[int, float]:
     """Record session end.  Returns ``(duration_s, cost_usd)``."""
     now = time.time()
-    conn = _connect()
+    conn = connect()
     row = conn.execute(
         "SELECT started_at, memory_mb FROM sessions WHERE id = ?",
         (session_id,),
@@ -116,7 +89,7 @@ def log_end(session_id: int) -> tuple[int, float]:
 
 def get_stats() -> UsageStats:
     """Aggregated stats across all completed sessions."""
-    conn = _connect()
+    conn = connect()
     row = conn.execute(
         "SELECT COUNT(*), COALESCE(SUM(duration_s), 0),"
         " COALESCE(SUM(cost_usd), 0)"
@@ -132,7 +105,7 @@ def get_stats() -> UsageStats:
 
 def get_recent(limit: int = 20) -> list[SessionRecord]:
     """Most recent completed sessions, newest first."""
-    conn = _connect()
+    conn = connect()
     rows = conn.execute(
         "SELECT id, started_at, ended_at, region, duration_s, cost_usd"
         " FROM sessions WHERE ended_at IS NOT NULL"
@@ -151,7 +124,7 @@ def get_daily_costs(days: int = 30) -> list[float]:
     """
     from datetime import datetime, timedelta
 
-    conn = _connect()
+    conn = connect()
     today = datetime.now(tz=UTC).date()
     start = today - timedelta(days=days - 1)
 
@@ -173,7 +146,7 @@ def get_daily_costs(days: int = 30) -> list[float]:
 
 def get_live_cost(session_id: int) -> tuple[int, float]:
     """Current duration and cost of a *running* session (not yet ended)."""
-    conn = _connect()
+    conn = connect()
     row = conn.execute(
         "SELECT started_at, memory_mb FROM sessions WHERE id = ?",
         (session_id,),
